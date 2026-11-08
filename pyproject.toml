@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools==84.2.1", "wheel==0.48.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autotrade-mofid"
+version = "0.1.1"
+description = "Python library to place buy/sell limit orders on Mofid EasyTrader"
+readme = "README.md"
+requires-python = ">=3.15"
+license = "MIT"
+authors = [{ name = "Hossein" }]
+keywords = ["mofid", "easytrader", "trading", "iran", "bourse"]
+dependencies = [
+  "playwright==1.64.1",
+  "python-dotenv==1.2.4",
+  "pydantic==2.14.3",
+  "pydantic-settings==2.16.2",
+]
+
+[project.optional-dependencies]
+cli = ["typer==0.28.0"]
+dev = ["pytest==9.2.0", "pytest-mock==3.17.0", "typer==0.28.0"]
+
+[project.urls]
+Homepage = "https://github.com/hosseiin1993/AutoTrade-MofidBroker"
+Repository = "https://github.com/hosseiin1993/AutoTrade-MofidBroker"
+Issues = "https://github.com/hosseiin1993/AutoTrade-MofidBroker/issues"
+
+[project.scripts]
+autotrade = "autotrade.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["autotrade*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

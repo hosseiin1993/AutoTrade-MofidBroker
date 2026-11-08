@@ -1,0 +1,28 @@
+# Secrets / runtime
+.env
+.mofid_token.json
+*.log
+artifacts/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Local agent tooling
+.grok/
+AGENTS.md

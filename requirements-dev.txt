@@ -1,0 +1,4 @@
+-r requirements.txt
+typer==0.28.0
+pytest==9.2.0
+pytest-mock==3.17.0
