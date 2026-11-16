@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from autotrade.broker.client import EasyTraderClient, buying_power, order_total_value
+from autotrade.broker.constants import MIN_NOTIONAL_RIAL
 from autotrade.broker.errors import EasyApiError
+from autotrade.broker.values import as_int
 from autotrade.models import PreparedOrder, PriceMode, Side
 from autotrade.trading.price import PriceError, resolve_price
 
@@ -16,6 +19,86 @@ class PrepareError(RuntimeError):
 
 def _rial(amount: int) -> str:
     return f"{int(amount):,} Rial ({int(amount) // 10:,} Toman)"
+
+
+def _positive(source: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        number = as_int(source.get(key))
+        if number is not None and number > 0:
+            return number
+    return None
+
+
+def validate_volume(md: dict[str, Any], *, side: Side, quantity: int) -> None:
+    if side is Side.BUY:
+        min_q = md.get("minValidBuyVolume")
+        max_q = md.get("maxValidBuyVolume")
+    else:
+        min_q = md.get("minValidSellVolume") or md.get("minValidBuyVolume")
+        max_q = md.get("maxValidSellVolume") or md.get("maxValidBuyVolume")
+    if min_q and int(quantity) < int(min_q):
+        raise PrepareError(f"quantity {quantity} below min volume {min_q}.")
+    if max_q and int(quantity) > int(max_q):
+        raise PrepareError(f"quantity {quantity} above max volume {max_q}.")
+
+
+def validate_limit_terms(
+    *,
+    price: int,
+    quantity: int,
+    side: Side,
+    symbol: dict[str, Any],
+    md: dict[str, Any],
+) -> None:
+    """Band / lot / tick / volume / notional checks used when editing an open order."""
+    low = _positive(md, "lowAllowedPrice", "minDailyPrice")
+    high = _positive(md, "highAllowedPrice", "maxDailyPrice")
+    if low is None or high is None:
+        raise PrepareError("daily price band is missing for this symbol")
+    if price < low or price > high:
+        raise PrepareError(f"price {price} is outside the daily band {low}–{high}")
+
+    lot = _positive(symbol, "minDealableCount", "lotSize") or _positive(
+        md, "minDealableCount", "lotSize"
+    )
+    if lot and quantity % lot != 0:
+        raise PrepareError(f"quantity {quantity} is not a multiple of lot size {lot}")
+
+    tick = _positive(symbol, "minDealablePrice") or _positive(md, "minDealablePrice")
+    if tick and tick > 1 and price % tick != 0:
+        raise PrepareError(f"price {price} is not a multiple of the price step {tick}")
+
+    validate_volume(md, side=side, quantity=quantity)
+
+    notional = price * quantity
+    if notional < MIN_NOTIONAL_RIAL:
+        raise PrepareError(
+            f"order notional {notional:,} Rial is below the {MIN_NOTIONAL_RIAL:,} Rial minimum"
+        )
+
+
+def market_for_symbol(
+    client: EasyTraderClient, symbol_row: dict[str, Any], side: Side
+) -> tuple[dict[str, Any], float]:
+    """Market data + commission for a symbol row. Raises PrepareError on API failure."""
+    try:
+        isin = str(symbol_row["symbolIsin"])
+        md = client.market_data(isin)
+    except (EasyApiError, KeyError, TypeError) as exc:
+        raise PrepareError(f"Order prep failed: {exc}") from exc
+    return md, client.commission_rate(md, side)
+
+
+def instrument_by_isin(
+    client: EasyTraderClient, isin: str, side: Side
+) -> tuple[dict[str, Any], dict[str, Any], float]:
+    """Symbol row, market data, and commission for an ISIN."""
+    try:
+        symbol = client.find_symbol_by_isin(isin)
+    except EasyApiError as exc:
+        raise PrepareError(f"Order prep failed: {exc}") from exc
+    md, commission = market_for_symbol(client, symbol, side)
+    return symbol, md, commission
 
 
 def prepare_order(
@@ -35,25 +118,16 @@ def prepare_order(
     try:
         sym = client.find_symbol(symbol)
         isin = sym["symbolIsin"]
-        md = client.market_data(isin)
+        md, commission = market_for_symbol(client, sym, side)
         final_price, resolved_mode = resolve_price(
             md, side=side, price_mode=price_mode, fixed_price=price
         )
-        commission = client.commission_rate(md, side)
+    except PrepareError:
+        raise
     except (EasyApiError, PriceError, KeyError) as exc:
         raise PrepareError(f"Order prep failed: {exc}") from exc
 
-    if side is Side.BUY:
-        min_q = md.get("minValidBuyVolume")
-        max_q = md.get("maxValidBuyVolume")
-    else:
-        min_q = md.get("minValidSellVolume") or md.get("minValidBuyVolume")
-        max_q = md.get("maxValidSellVolume") or md.get("maxValidBuyVolume")
-
-    if min_q and int(quantity) < int(min_q):
-        raise PrepareError(f"quantity {quantity} below min volume {min_q}.")
-    if max_q and int(quantity) > int(max_q):
-        raise PrepareError(f"quantity {quantity} above max volume {max_q}.")
+    validate_volume(md, side=side, quantity=quantity)
 
     value = order_total_value(
         side=side, price=final_price, quantity=int(quantity), commission=commission

@@ -14,8 +14,11 @@ from autotrade.broker.constants import (
     DEFAULT_BUY_COMMISSION,
     DEFAULT_SELL_COMMISSION,
     MIN_TOKEN_LEN,
+    ORDER_DELETE_PATH,
     ORDER_FROM,
+    ORDER_LIST_PATH,
     ORDER_MODEL_TYPE,
+    ORDER_SUBMIT_PATH,
     SIDE_BUY,
     SIDE_SELL,
     SUBMIT_INTERVAL_FLOOR_S,
@@ -24,22 +27,12 @@ from autotrade.broker.constants import (
 )
 from autotrade.broker.errors import ApiAuthError, EasyApiError
 from autotrade.broker.transport import Transport
+from autotrade.broker.values import as_int
 from autotrade.models import Side
 
 logger = logging.getLogger(__name__)
 
 _BEARER_RE = re.compile(r"^Bearer (.+)$", re.IGNORECASE)
-
-
-def _as_int(value: object) -> int | None:
-    """Whole number from the broker, or None when the field is missing or not numeric."""
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return None
 
 
 def _match_count(
@@ -69,9 +62,9 @@ def _row_matches(
     isin_f = row.get("symbolIsin") or row.get("isin") or item.get("symbolIsin")
     return (
         str(isin_f or "") == str(isin)
-        and _as_int(row.get("quantity")) == quantity
-        and _as_int(row.get("price")) == price
-        and _as_int(row.get("side")) == side.api_code
+        and as_int(row.get("quantity")) == quantity
+        and as_int(row.get("price")) == price
+        and as_int(row.get("side")) == side.api_code
     )
 
 
@@ -228,6 +221,15 @@ class EasyTraderClient:
         matches.sort(key=lambda s: not s.get("isActive", False))
         return matches[0]
 
+    def find_symbol_by_isin(self, isin: str) -> dict[str, Any]:
+        target = (isin or "").strip()
+        if not target:
+            raise EasyApiError("Empty symbol isin.")
+        for symbol in self.all_symbols():
+            if str(symbol.get("symbolIsin") or "") == target:
+                return symbol
+        raise EasyApiError(f"Symbol isin {isin!r} not found.")
+
     def market_data(self, isin: str) -> dict[str, Any]:
         data = self._request("POST", "/symbols/api/marketdata/v2", json_body=[isin])
         if not isinstance(data, list) or not data:
@@ -256,7 +258,7 @@ class EasyTraderClient:
         return data
 
     @staticmethod
-    def build_order_payload(
+    def _order_fields(
         *,
         side: Side,
         isin: str,
@@ -264,6 +266,8 @@ class EasyTraderClient:
         quantity: int,
         price: int,
         commission: float,
+        validity_type: int = VALIDITY_TYPE_DAY,
+        validity_date: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         if quantity <= 0:
@@ -273,22 +277,47 @@ class EasyTraderClient:
         if not isin:
             raise EasyApiError("symbolIsin empty.")
         n = now or datetime.now(TEHRAN_TZ)
+        body: dict[str, Any] = {
+            "price": price,
+            "quantity": quantity,
+            "side": SIDE_BUY if side is Side.BUY else SIDE_SELL,
+            "validityType": validity_type,
+            "createDateTime": format_create_datetime(n),
+            "commission": commission,
+            "symbolIsin": isin,
+            "symbolName": symbol_name,
+            "orderModelType": ORDER_MODEL_TYPE,
+            "totalValue": order_total_value(
+                side=side, price=price, quantity=quantity, commission=commission
+            ),
+            "orderFrom": ORDER_FROM,
+        }
+        if validity_type != VALIDITY_TYPE_DAY and validity_date:
+            body["validityDate"] = validity_date
+        return body
+
+    @classmethod
+    def build_order_payload(
+        cls,
+        *,
+        side: Side,
+        isin: str,
+        symbol_name: str,
+        quantity: int,
+        price: int,
+        commission: float,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
         return {
-            "order": {
-                "price": price,
-                "quantity": quantity,
-                "side": SIDE_BUY if side is Side.BUY else SIDE_SELL,
-                "validityType": VALIDITY_TYPE_DAY,
-                "createDateTime": format_create_datetime(n),
-                "commission": commission,
-                "symbolIsin": isin,
-                "symbolName": symbol_name,
-                "orderModelType": ORDER_MODEL_TYPE,
-                "totalValue": order_total_value(
-                    side=side, price=price, quantity=quantity, commission=commission
-                ),
-                "orderFrom": ORDER_FROM,
-            }
+            "order": cls._order_fields(
+                side=side,
+                isin=isin,
+                symbol_name=symbol_name,
+                quantity=quantity,
+                price=price,
+                commission=commission,
+                now=now,
+            )
         }
 
     def _wait_submit_slot(self, interval: float) -> float:
@@ -331,14 +360,77 @@ class EasyTraderClient:
             side.value,
             payload["order"],
         )
-        return self._request("POST", "/core/api/v2/order", json_body=payload)
+        return self._request("POST", ORDER_SUBMIT_PATH, json_body=payload)
 
     def list_orders(self) -> list[dict[str, Any]]:
-        data = self._request("GET", "/core/api/order")
+        data = self._request("GET", ORDER_LIST_PATH)
         orders = data.get("orders") if isinstance(data, dict) else None
         if orders is None:
             raise EasyApiError(f"order list missing 'orders': {str(data)[:120]}")
         return orders
+
+    @classmethod
+    def build_modify_payload(
+        cls,
+        *,
+        side: Side,
+        isin: str,
+        symbol_name: str,
+        quantity: int,
+        price: int,
+        commission: float,
+        parent_id: str,
+        validity_type: int = VALIDITY_TYPE_DAY,
+        validity_date: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Body of PUT /core/api/v2/order.
+
+        EasyTrader 2.6.1 sends ``{modifyOrder: {...}}``. ``parentId`` is the id of
+        the order being replaced and ``id`` is null. The web app does not send
+        the host serial (``hon``) on this call.
+        """
+        if not parent_id:
+            raise EasyApiError("modify order requires parentId")
+        return {
+            "modifyOrder": {
+                **cls._order_fields(
+                    side=side,
+                    isin=isin,
+                    symbol_name=symbol_name,
+                    quantity=quantity,
+                    price=price,
+                    commission=commission,
+                    validity_type=validity_type,
+                    validity_date=validity_date,
+                    now=now,
+                ),
+                "id": None,
+                "parentId": parent_id,
+            }
+        }
+
+    def modify_order(self, body: dict[str, Any]) -> Any:
+        """One PUT. Do not call this again after the broker has accepted it."""
+        modify_order = body.get("modifyOrder") if isinstance(body, dict) else None
+        if not isinstance(modify_order, dict) or not modify_order.get("parentId"):
+            raise EasyApiError("modify order requires parentId")
+        logger.info(
+            "Modifying order via API: parentId=%s %s qty=%s price=%s",
+            modify_order.get("parentId"),
+            modify_order.get("symbolName"),
+            modify_order.get("quantity"),
+            modify_order.get("price"),
+        )
+        return self._request("PUT", ORDER_SUBMIT_PATH, json_body=body)
+
+    def cancel_order(self, order_id: str, *, order_from: int = ORDER_FROM) -> Any:
+        """One DELETE. Do not call this again after the broker has accepted it."""
+        if not order_id:
+            raise EasyApiError("cancel order requires orderId")
+        body = {"orderId": order_id, "orderFrom": order_from}
+        logger.info("Cancelling order via API: orderId=%s", order_id)
+        return self._request("DELETE", ORDER_DELETE_PATH, json_body=body)
 
     def order_appeared(
         self,

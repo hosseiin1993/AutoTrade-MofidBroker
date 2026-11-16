@@ -21,8 +21,17 @@ from autotrade.browser import (
     login,
 )
 from autotrade.config import Settings, get_settings
+from autotrade.broker.orders import LiveOrder
+from autotrade.models import PriceMode
 from autotrade.order import Order, TradeError
 from autotrade.trading.clock import ApiClock, wait_until
+from autotrade.trading.manage import (
+    CancelResult,
+    EditResult,
+    list_live_orders,
+    run_cancel,
+    run_edit,
+)
 from autotrade.trading.prepare import prepare_order
 from autotrade.trading.submit import execute_order
 
@@ -91,6 +100,59 @@ def bootstrap_client(
         save_token(token, path, account_hint=hint)
         logger.info("API token cached (%s).", describe(path))
     return _client(token, transport, settings), page, context
+
+
+def call_with_client(settings: Settings, *, use_token_cache: bool, action: Any) -> Any:
+    """Open one broker session, run ``action(client)``, then close the browser."""
+    try:
+        client, _page, _ctx = bootstrap_client(settings, use_token_cache=use_token_cache)
+        return action(client)
+    finally:
+        cleanup_all()
+
+
+def list_account_orders(settings: Settings, *, use_token_cache: bool = True) -> list[LiveOrder]:
+    return call_with_client(
+        settings,
+        use_token_cache=use_token_cache,
+        action=list_live_orders,
+    )
+
+
+def edit_account_order(
+    settings: Settings,
+    order_id: str,
+    *,
+    price_mode: PriceMode | str | None = None,
+    price: int | None = None,
+    quantity: int | None = None,
+    dry_run: bool = False,
+    use_token_cache: bool = True,
+) -> EditResult:
+    def action(client: EasyTraderClient) -> EditResult:
+        return run_edit(
+            client,
+            order_id,
+            price_mode=price_mode,
+            price=price,
+            quantity=quantity,
+            dry_run=dry_run,
+        )
+
+    return call_with_client(settings, use_token_cache=use_token_cache, action=action)
+
+
+def cancel_account_order(
+    settings: Settings,
+    order_id: str,
+    *,
+    dry_run: bool = False,
+    use_token_cache: bool = True,
+) -> CancelResult:
+    def action(client: EasyTraderClient) -> CancelResult:
+        return run_cancel(client, order_id, dry_run=dry_run)
+
+    return call_with_client(settings, use_token_cache=use_token_cache, action=action)
 
 
 def place_order(order: Order, settings: Settings | None = None) -> None:
