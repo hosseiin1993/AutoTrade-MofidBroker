@@ -80,6 +80,30 @@ def validate_limit_terms(
         )
 
 
+def market_for_symbol(
+    client: EasyTraderClient, symbol_row: dict[str, Any], side: Side
+) -> tuple[dict[str, Any], float]:
+    """Market data + commission for a symbol row. Raises PrepareError on API failure."""
+    try:
+        isin = str(symbol_row["symbolIsin"])
+        md = client.market_data(isin)
+    except (EasyApiError, KeyError, TypeError) as exc:
+        raise PrepareError(f"Order prep failed: {exc}") from exc
+    return md, client.commission_rate(md, side)
+
+
+def instrument_by_isin(
+    client: EasyTraderClient, isin: str, side: Side
+) -> tuple[dict[str, Any], dict[str, Any], float]:
+    """Symbol row, market data, and commission for an ISIN."""
+    try:
+        symbol = client.find_symbol_by_isin(isin)
+    except EasyApiError as exc:
+        raise PrepareError(f"Order prep failed: {exc}") from exc
+    md, commission = market_for_symbol(client, symbol, side)
+    return symbol, md, commission
+
+
 def prepare_order(
     client: EasyTraderClient,
     *,
@@ -97,11 +121,12 @@ def prepare_order(
     try:
         sym = client.find_symbol(symbol)
         isin = sym["symbolIsin"]
-        md = client.market_data(isin)
+        md, commission = market_for_symbol(client, sym, side)
         final_price, resolved_mode = resolve_price(
             md, side=side, price_mode=price_mode, fixed_price=price
         )
-        commission = client.commission_rate(md, side)
+    except PrepareError:
+        raise
     except (EasyApiError, PriceError, KeyError) as exc:
         raise PrepareError(f"Order prep failed: {exc}") from exc
 

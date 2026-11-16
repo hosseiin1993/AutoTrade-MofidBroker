@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -15,11 +15,27 @@ from autotrade.broker.errors import EasyApiError
 from autotrade.broker.orders import LiveOrder, order_row_id, parse_live_order
 from autotrade.models import PriceMode, Side
 from autotrade.order import OrderError, TradeError
-from autotrade.trading.prepare import PrepareError, validate_limit_terms
+from autotrade.trading.prepare import (
+    PrepareError,
+    instrument_by_isin,
+    validate_limit_terms,
+)
 from autotrade.trading.price import PriceError, resolve_price
 from autotrade.trading.submit import classify_submit_response
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PreparedEdit:
+    """Validated modify payload, not yet sent."""
+
+    order_id: str
+    symbol: str
+    side: Side
+    quantity: int
+    price: int
+    payload: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -117,7 +133,7 @@ def resolve_edit_price(
 
 
 def resolve_edit_quantity(order: LiveOrder, quantity: int | None) -> int:
-    """Quantity of the unfilled remainder. ``-q`` replaces that remainder."""
+    """Quantity of the unfilled remainder. An explicit quantity replaces that remainder."""
     if quantity is None:
         return order.remainder
     if quantity <= 0:
@@ -154,6 +170,24 @@ def _refuse_cancel(order: LiveOrder) -> None:
         )
 
 
+def _edit_result(
+    plan: PreparedEdit,
+    *,
+    new_order_id: str | None,
+    dry_run: bool,
+) -> EditResult:
+    return EditResult(
+        order_id=plan.order_id,
+        new_order_id=new_order_id,
+        symbol=plan.symbol,
+        side=plan.side,
+        quantity=plan.quantity,
+        price=plan.price,
+        payload=plan.payload,
+        dry_run=dry_run,
+    )
+
+
 def prepare_edit(
     client: EasyTraderClient,
     order_id: str,
@@ -162,15 +196,11 @@ def prepare_edit(
     price: int | None = None,
     quantity: int | None = None,
     now: datetime | None = None,
-) -> EditResult:
+) -> PreparedEdit:
     order = find_live_order(client, order_id)
     _refuse_edit(order)
     mode = _coerce_mode(price_mode)
-    try:
-        symbol = client.find_symbol_by_isin(order.isin)
-        md = client.market_data(order.isin)
-    except EasyApiError as exc:
-        raise PrepareError(f"Order prep failed: {exc}") from exc
+    symbol, md, commission = instrument_by_isin(client, order.isin, order.side)
     final_price = resolve_edit_price(md, order, mode, price)
     final_qty = resolve_edit_quantity(order, quantity)
     validate_limit_terms(
@@ -180,7 +210,6 @@ def prepare_edit(
         symbol=symbol,
         md=md,
     )
-    commission = client.commission_rate(md, order.side)
     symbol_name = order.symbol or str(symbol.get("symbolName") or order.isin)
     payload = EasyTraderClient.build_modify_payload(
         side=order.side,
@@ -202,19 +231,17 @@ def prepare_edit(
         order.filled,
         order.quantity,
     )
-    return EditResult(
+    return PreparedEdit(
         order_id=order.id,
-        new_order_id=None,
         symbol=symbol_name,
         side=order.side,
         quantity=final_qty,
         price=final_price,
         payload=payload,
-        dry_run=True,
     )
 
 
-def apply_edit(client: EasyTraderClient, plan: EditResult) -> EditResult:
+def apply_edit(client: EasyTraderClient, plan: PreparedEdit) -> EditResult:
     """Send the modify once. An accepted edit is not retried."""
     resp = client.modify_order(plan.payload)
     outcome = classify_submit_response(resp)
@@ -223,7 +250,7 @@ def apply_edit(client: EasyTraderClient, plan: EditResult) -> EditResult:
         message = outcome.message or "broker did not accept the edit"
         raise TradeError(f"Edit rejected (code {code}): {message}")
     logger.info("Edit accepted parentId=%s id=%s", plan.order_id, outcome.order_id or "-")
-    return replace(plan, new_order_id=outcome.order_id, dry_run=False)
+    return _edit_result(plan, new_order_id=outcome.order_id, dry_run=False)
 
 
 def run_edit(
@@ -246,7 +273,7 @@ def run_edit(
     )
     if dry_run:
         logger.info("Dry run — modify not sent for %s.", order_id)
-        return plan
+        return _edit_result(plan, new_order_id=None, dry_run=True)
     return apply_edit(client, plan)
 
 
@@ -346,6 +373,7 @@ def summarize_cancel(result: CancelResult) -> str:
 __all__ = [
     "CancelResult",
     "EditResult",
+    "PreparedEdit",
     "run_cancel",
     "run_edit",
     "summarize_cancel",

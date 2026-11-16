@@ -14,6 +14,7 @@ from autotrade.broker.constants import (
     ORDER_STATE_ON_CANCELING,
     VALIDITY_TYPE_DAY,
 )
+from autotrade.broker.values import as_int
 from autotrade.models import Side
 
 _OPEN_NAMES = {ORDER_STATE_NAMES[code].casefold() for code in OPEN_ORDER_STATES}
@@ -22,20 +23,6 @@ _CANCELLED_NORM = {
     for code in CANCELLED_ORDER_STATES
 }
 _STATE_BY_NAME = {name.casefold(): code for code, name in ORDER_STATE_NAMES.items()}
-
-
-def _as_int(value: object) -> int | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str):
-        text = value.strip()
-        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
-            return int(text)
-    return None
 
 
 def _norm_status(value: str) -> str:
@@ -132,7 +119,7 @@ def _side(value: object) -> Side | None:
         if text in {"sell", "1"}:
             return Side.SELL
         return None
-    code = _as_int(value)
+    code = as_int(value)
     if code == 0:
         return Side.BUY
     if code == 1:
@@ -143,7 +130,7 @@ def _side(value: object) -> Side | None:
 def _filled(row: dict[str, Any]) -> int:
     explicit = 0
     for key in ("executedQuantity", "ExecutedQuantity", "volumeDone"):
-        number = _as_int(row.get(key))
+        number = as_int(row.get(key))
         if number is not None and number > explicit:
             explicit = number
     traded = 0
@@ -152,7 +139,7 @@ def _filled(row: dict[str, Any]) -> int:
         for trade in trades:
             if not isinstance(trade, dict) or trade.get("isCancel"):
                 continue
-            qty = _as_int(trade.get("quantity"))
+            qty = as_int(trade.get("quantity"))
             if qty is not None and qty > 0:
                 traded += qty
     return max(explicit, traded)
@@ -181,13 +168,13 @@ def parse_live_order(item: dict[str, Any]) -> LiveOrder:
     side = _side(row.get("side"))
     if side is None:
         raise ValueError(f"order {raw_id} is missing a side")
-    quantity = _as_int(row.get("quantity"))
-    price = _as_int(row.get("price"))
+    quantity = as_int(row.get("quantity"))
+    price = as_int(row.get("price"))
     if quantity is None or price is None:
         raise ValueError(f"order {raw_id} is missing quantity or price")
 
     state_value = row.get("orderState")
-    state = _as_int(state_value)
+    state = as_int(state_value)
     status_text = str(row.get("orderStateStr") or row.get("stateStr") or "").strip()
     if state is None and isinstance(state_value, str) and state_value.strip():
         status_text = status_text or state_value.strip()
@@ -196,7 +183,7 @@ def parse_live_order(item: dict[str, Any]) -> LiveOrder:
         ORDER_STATE_NAMES.get(state, str(state)) if state is not None else "Unknown"
     )
 
-    validity = _as_int(row.get("validityType"))
+    validity = as_int(row.get("validityType"))
     validity_date = row.get("validityDate")
     parent = row.get("parentId")
     return LiveOrder(

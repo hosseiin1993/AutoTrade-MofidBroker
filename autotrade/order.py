@@ -80,9 +80,9 @@ class Order:
         chosen_symbol = (symbol if symbol is not None else settings.symbol).strip()
         chosen_qty = quantity if quantity is not None else settings.quantity
         if not chosen_symbol:
-            raise OrderError("set --symbol or SYMBOL in .env")
+            raise OrderError("symbol is required")
         if chosen_qty <= 0:
-            raise OrderError("set --quantity or QUANTITY > 0")
+            raise OrderError("quantity must be > 0")
 
         return Order(
             side=_coerce(Side, side if side is not None else settings.side),

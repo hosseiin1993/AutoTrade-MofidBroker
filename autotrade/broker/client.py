@@ -27,22 +27,12 @@ from autotrade.broker.constants import (
 )
 from autotrade.broker.errors import ApiAuthError, EasyApiError
 from autotrade.broker.transport import Transport
+from autotrade.broker.values import as_int
 from autotrade.models import Side
 
 logger = logging.getLogger(__name__)
 
 _BEARER_RE = re.compile(r"^Bearer (.+)$", re.IGNORECASE)
-
-
-def _as_int(value: object) -> int | None:
-    """Whole number from the broker, or None when the field is missing or not numeric."""
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return None
 
 
 def _match_count(
@@ -72,9 +62,9 @@ def _row_matches(
     isin_f = row.get("symbolIsin") or row.get("isin") or item.get("symbolIsin")
     return (
         str(isin_f or "") == str(isin)
-        and _as_int(row.get("quantity")) == quantity
-        and _as_int(row.get("price")) == price
-        and _as_int(row.get("side")) == side.api_code
+        and as_int(row.get("quantity")) == quantity
+        and as_int(row.get("price")) == price
+        and as_int(row.get("side")) == side.api_code
     )
 
 
