@@ -71,36 +71,42 @@ def list_live_orders(client: EasyTraderClient) -> list[LiveOrder]:
     return orders
 
 
+def _matching_live_order(
+    client: EasyTraderClient, order_id: str
+) -> LiveOrder | None:
+    """Parse the row with this id. None if absent. ValueError if the match is corrupt."""
+    for item in client.list_orders():
+        if order_row_id(item) != order_id:
+            continue
+        return parse_live_order(item)
+    return None
+
+
 def find_live_order(client: EasyTraderClient, order_id: str) -> LiveOrder:
     """Load one order by id. A matching but unreadable row is an error, not a miss."""
     target = (order_id or "").strip()
     if not target:
         raise OrderError("order id is required")
-    for item in client.list_orders():
-        if order_row_id(item) != target:
-            continue
-        try:
-            return parse_live_order(item)
-        except ValueError as exc:
-            raise OrderError(f"order {target} is unreadable ({exc})") from exc
-    raise OrderError(f"order {target} not found")
+    try:
+        found = _matching_live_order(client, target)
+    except ValueError as exc:
+        raise OrderError(f"order {target} is unreadable ({exc})") from exc
+    if found is None:
+        raise OrderError(f"order {target} not found")
+    return found
 
 
 def _read_order_after_cancel(
     client: EasyTraderClient, order_id: str
 ) -> LiveOrder | None:
     """Return the live row, None if absent. A corrupt matching row is a TradeError."""
-    for item in client.list_orders():
-        if order_row_id(item) != order_id:
-            continue
-        try:
-            return parse_live_order(item)
-        except ValueError as exc:
-            raise TradeError(
-                f"Cancel was accepted for {order_id}, but the order list row is unreadable "
-                f"({exc}). Not sending the cancel again."
-            ) from exc
-    return None
+    try:
+        return _matching_live_order(client, order_id)
+    except ValueError as exc:
+        raise TradeError(
+            f"Cancel was accepted for {order_id}, but the order list row is unreadable "
+            f"({exc}). Not sending the cancel again."
+        ) from exc
 
 
 def _coerce_mode(price_mode: PriceMode | str | None) -> PriceMode | None:

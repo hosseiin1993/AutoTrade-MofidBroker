@@ -6,6 +6,7 @@ from typing import Any
 from autotrade.broker.client import EasyTraderClient, buying_power, order_total_value
 from autotrade.broker.constants import MIN_NOTIONAL_RIAL
 from autotrade.broker.errors import EasyApiError
+from autotrade.broker.values import as_int
 from autotrade.models import PreparedOrder, PriceMode, Side
 from autotrade.trading.price import PriceError, resolve_price
 
@@ -22,13 +23,9 @@ def _rial(amount: int) -> str:
 
 def _positive(source: dict[str, Any], *keys: str) -> int | None:
     for key in keys:
-        value = source.get(key)
-        if isinstance(value, bool) or value is None:
-            continue
-        if isinstance(value, int) and value > 0:
-            return value
-        if isinstance(value, float) and value.is_integer() and int(value) > 0:
-            return int(value)
+        number = as_int(source.get(key))
+        if number is not None and number > 0:
+            return number
     return None
 
 
