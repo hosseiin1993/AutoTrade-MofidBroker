@@ -90,6 +90,13 @@ class LiveOrder:
     def cancellable(self) -> bool:
         return self.remainder > 0 and not self.cancelled and not self.fully_executed
 
+    @property
+    def cancel_pending(self) -> bool:
+        """Broker accepted a cancel and has not finished it yet (OnCanceling)."""
+        if self.state == 9:
+            return True
+        return _norm_status(self.status) == "oncanceling"
+
 
 def _side(value: object) -> Side | None:
     if isinstance(value, str):

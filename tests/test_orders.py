@@ -316,6 +316,34 @@ def test_cancel_confirms_a_cancelled_status() -> None:
     assert len(_deletes(calls)) == 1
 
 
+def test_cancel_waits_through_on_canceling_without_a_second_delete() -> None:
+    state = {"n": 0}
+
+    def orders():
+        state["n"] += 1
+        if state["n"] == 1:
+            return {"orders": [_order(executedQuantity=3)]}
+        if state["n"] == 2:
+            return {
+                "orders": [
+                    _order(orderState=9, orderStateStr="OnCanceling", executedQuantity=3)
+                ]
+            }
+        return {"orders": []}
+
+    client, calls = _client(orders_body=orders)
+    result = run_cancel(
+        client,
+        ORDER_ID,
+        sleep_fn=lambda _seconds: None,
+        monotonic_fn=lambda: 0.0,
+        confirm_timeout=5.0,
+    )
+    assert result.outcome == "gone"
+    assert result.filled == 3
+    assert len(_deletes(calls)) == 1
+
+
 def test_cancel_does_not_retry_when_the_order_stays_open() -> None:
     client, calls = _client(_order())
     with pytest.raises(TradeError, match="still OnBoard"):

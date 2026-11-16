@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -296,7 +297,15 @@ def run_edit(
     return apply_edit(client, plan)
 
 
-def run_cancel(client: EasyTraderClient, order_id: str, *, dry_run: bool = False) -> CancelResult:
+def run_cancel(
+    client: EasyTraderClient,
+    order_id: str,
+    *,
+    dry_run: bool = False,
+    confirm_timeout: float = 5.0,
+    sleep_fn=time.sleep,
+    monotonic_fn=time.monotonic,
+) -> CancelResult:
     order = find_live_order(client, order_id)
     _require_cancellable(order)
     if dry_run:
@@ -315,43 +324,51 @@ def run_cancel(client: EasyTraderClient, order_id: str, *, dry_run: bool = False
         code = outcome.code if outcome.code is not None else "-"
         message = outcome.message or "broker did not accept the cancel"
         raise TradeError(f"Cancel rejected (code {code}): {message}")
-    try:
-        after = list_live_orders(client)
-    except EasyApiError as exc:
+    # One DELETE was sent. OnCanceling means it is in progress, so keep reading
+    # the list. Do not send the cancel again.
+    deadline = monotonic_fn() + confirm_timeout
+    while True:
+        try:
+            after = list_live_orders(client)
+        except EasyApiError as exc:
+            raise TradeError(
+                f"Cancel was accepted for {order.id}, but the order list could not be read "
+                f"to confirm it ({exc}). Not sending the cancel again. Filled {order.filled}."
+            ) from exc
+        found = next((row for row in after if row.id == order.id), None)
+        if found is None:
+            logger.info("Cancel confirmed: %s is gone. Filled %s.", order.id, order.filled)
+            return CancelResult(
+                order_id=order.id,
+                symbol=order.symbol,
+                filled=order.filled,
+                status="gone",
+                outcome="gone",
+                dry_run=False,
+            )
+        if found.cancelled:
+            logger.info(
+                "Cancel confirmed: %s is %s. Filled %s.",
+                order.id,
+                found.status,
+                found.filled,
+            )
+            return CancelResult(
+                order_id=order.id,
+                symbol=found.symbol or order.symbol,
+                filled=found.filled,
+                status=found.status,
+                outcome="cancelled",
+                dry_run=False,
+            )
+        if found.cancel_pending and monotonic_fn() < deadline:
+            sleep_fn(0.4)
+            continue
+        filled = found.filled
         raise TradeError(
-            f"Cancel was accepted for {order.id}, but the order list could not be read "
-            f"to confirm it ({exc}). Not sending the cancel again. Filled {order.filled}."
-        ) from exc
-    found = next((row for row in after if row.id == order.id), None)
-    if found is None:
-        logger.info("Cancel confirmed: %s is gone. Filled %s.", order.id, order.filled)
-        return CancelResult(
-            order_id=order.id,
-            symbol=order.symbol,
-            filled=order.filled,
-            status="gone",
-            outcome="gone",
-            dry_run=False,
+            f"Cancel was accepted for {order.id}, but the order is still {found.status}. "
+            f"Not sending the cancel again. Filled {filled}."
         )
-    if found.cancelled:
-        logger.info(
-            "Cancel confirmed: %s is %s. Filled %s.",
-            order.id,
-            found.status,
-            found.filled,
-        )
-        return CancelResult(
-            order_id=order.id,
-            symbol=found.symbol or order.symbol,
-            filled=found.filled,
-            status=found.status,
-            outcome="cancelled",
-            dry_run=False,
-        )
-    raise TradeError(
-        f"Cancel was accepted for {order.id}, but the order is still {found.status}. "
-        f"Not sending the cancel again. Filled {found.filled}."
-    )
 
 
 def summarize_edit(result: EditResult) -> str:

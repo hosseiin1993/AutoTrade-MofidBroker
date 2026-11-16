@@ -94,7 +94,7 @@ python -m autotrade cancel --order-id ID --dry-run
 
 `edit` changes only the unfilled remainder. A fully executed or cancelled order is refused before any modify request. `--price-mode` uses the same ceiling, floor, reference, and fixed prices as buy/sell (`auto` follows the order's side). The new price must sit in the symbol's daily band, the open quantity must match the lot size (and the price step, when the symbol has one), and the open notional must be at least 5,000,000 Rial. `--dry-run` prints the request and does not send it.
 
-`cancel` calls the delete endpoint once, then reads the order list. Success means the order is gone or its status is cancelled; the filled quantity is reported either way. If the broker accepts the cancel and the order is still open, the command stops and does not send the cancel again.
+`cancel` calls the delete endpoint once, then reads the order list. If the broker reports the cancel as still in progress, the command keeps reading until the order is gone or cancelled. It does not send the cancel again. The filled quantity is reported either way. If the order is still open after that wait, the command stops.
 
 ```python
 from autotrade import cancel_order, edit_order, list_orders
