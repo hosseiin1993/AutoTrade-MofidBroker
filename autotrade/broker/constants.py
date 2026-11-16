@@ -9,6 +9,49 @@ ORDER_MODEL_TYPE = 1
 ORDER_FROM = 34
 VALIDITY_TYPE_DAY = 0
 
+# Same paths the EasyTrader 2.6.1 web app calls (orderUrl + these suffixes).
+ORDER_LIST_PATH = "/core/api/order"
+ORDER_SUBMIT_PATH = "/core/api/v2/order"
+ORDER_DELETE_PATH = "/core/api/v2/delete-order"
+
+# TSE standard-market minimum. EasyTrader uses 5e6 Rial for that check.
+MIN_NOTIONAL_RIAL = 5_000_000
+
+# orderState codes from the EasyTrader web app.
+ORDER_STATE_NAMES = {
+    0: "None",
+    1: "Modify",
+    2: "Error",
+    3: "Cancel",
+    4: "CancelBySurveillance",
+    5: "Done",
+    6: "OnBoard",
+    7: "OnSending",
+    8: "PartiallyExecution",
+    9: "OnCanceling",
+    10: "OnCancelError",
+    11: "OnModifyError",
+    12: "DeleteByBroker",
+    13: "Expired",
+    14: "PartiallyExecutedAndExpired",
+    15: "PartiallyExecutedAndModified",
+    16: "OnModifying",
+    17: "DeleteByNsc",
+    18: "CancelByBroker",
+    19: "OnModifyBoard",
+    20: "OrderExecuted",
+    24: "CancelOrderConfirmed",
+    28: "InOmsQueue",
+    29: "Open",
+    35: "PartiallyExecutedAndError",
+    36: "PartiallyExecutedAndCanceled",
+    40: "DeleteBySupervisor",
+}
+# States the order ticket still allows editing (IsEditValid / U$7, plus the board states).
+OPEN_ORDER_STATES = frozenset({0, 6, 8, 10, 11, 19, 28, 29})
+CANCELLED_ORDER_STATES = frozenset({3, 4, 12, 13, 14, 17, 18, 24, 36, 40})
+EXECUTED_ORDER_STATES = frozenset({20})
+
 DEFAULT_BUY_COMMISSION = 0.003712
 # Sell fee is typically higher (commission + tax). Prefer marketdata sellRatio.
 DEFAULT_SELL_COMMISSION = 0.0088

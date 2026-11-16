@@ -33,12 +33,18 @@ class PlaywrightTransport:
         headers: dict[str, str],
         json_body: Any,
     ) -> tuple[int, str]:
+        method_name = method.upper()
+        sender_name = {"GET": "get", "POST": "post", "PUT": "put", "DELETE": "delete"}.get(
+            method_name
+        )
+        if sender_name is None:
+            raise EasyApiError(f"Unsupported HTTP method {method}.")
         try:
-            if method.upper() == "GET":
+            if method_name == "GET":
                 resp = self.ctx.get(url, headers=headers, timeout=READ_TIMEOUT_MS)
             else:
                 data = json.dumps(json_body) if json_body is not None else None
-                resp = self.ctx.post(
+                resp = getattr(self.ctx, sender_name)(
                     url, headers=headers, data=data, timeout=READ_TIMEOUT_MS
                 )
         except Exception as exc:

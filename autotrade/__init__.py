@@ -1,6 +1,6 @@
-"""Place buy and sell orders on Mofid EasyTrader."""
+"""Place, edit, and cancel orders on Mofid EasyTrader."""
 
-from autotrade.api import buy, sell
+from autotrade.api import buy, cancel_order, edit_order, list_orders, sell
 from autotrade.config import Settings, get_settings
 from autotrade.logging_setup import setup_logging
 from autotrade.models import PriceMode, Side
@@ -17,7 +17,10 @@ __all__ = [
     "Side",
     "TradeError",
     "buy",
+    "cancel_order",
+    "edit_order",
     "get_settings",
+    "list_orders",
     "place_order",
     "sell",
     "setup_logging",

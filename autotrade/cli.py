@@ -10,15 +10,22 @@ from autotrade.browser import BrowserGone
 from autotrade.config import get_settings
 from autotrade.logging_setup import setup_logging
 from autotrade.models import PriceMode, Side
+from autotrade.broker.orders import format_orders
 from autotrade.order import Order, OrderError, TradeError, with_account
-from autotrade.session import place_order
+from autotrade.session import (
+    cancel_account_order,
+    edit_account_order,
+    list_account_orders,
+    place_order,
+)
+from autotrade.trading.manage import summarize_cancel, summarize_edit
 from autotrade.trading.prepare import PrepareError
 
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     add_completion=False,
-    help="Place buy or sell orders on Mofid EasyTrader.",
+    help="Place, edit, or cancel orders on Mofid EasyTrader.",
     no_args_is_help=True,
 )
 
@@ -70,6 +77,7 @@ SideOpt = Annotated[
     Side | None,
     typer.Option("--side", "-s", help="buy or sell (default: SIDE env / buy)"),
 ]
+OrderIdOpt = Annotated[str, typer.Option("--order-id", help="Broker order id")]
 
 
 def _go(
@@ -200,6 +208,101 @@ def sell_cmd(
         no_verify=no_verify,
         no_token_cache=no_token_cache,
     )
+
+
+def _account(username: str | None, password: str | None):
+    settings = get_settings()
+    setup_logging(settings.log_level, settings.log_file)
+    return with_account(settings, username, password)
+
+
+@app.command("orders")
+def orders_cmd(
+    username: Username = None,
+    password: Password = None,
+    no_token_cache: NoTokenCacheOpt = False,
+) -> None:
+    """List open and today's orders (id, symbol, side, qty, filled, price, status)."""
+    try:
+        account = _account(username, password)
+        rows = list_account_orders(
+            account,
+            use_token_cache=False if no_token_cache else account.token_cache,
+        )
+        typer.echo(format_orders(rows))
+    except OrderError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    except (TradeError, PrepareError, BrowserGone, EasyApiError, TimeoutError) as exc:
+        logger.error("%s", exc)
+        raise typer.Exit(1) from exc
+    except Exception:
+        logger.exception("Unhandled error")
+        raise typer.Exit(1)
+
+
+@app.command("edit")
+def edit_cmd(
+    order_id: OrderIdOpt,
+    username: Username = None,
+    password: Password = None,
+    price_mode: PriceModeOpt = None,
+    price: PriceOpt = None,
+    quantity: QuantityOpt = None,
+    dry_run: DryRunOpt = False,
+    no_token_cache: NoTokenCacheOpt = False,
+) -> None:
+    """Modify the unfilled remainder of an open order (price and/or quantity)."""
+    try:
+        account = _account(username, password)
+        result = edit_account_order(
+            account,
+            order_id,
+            price_mode=price_mode,
+            price=price,
+            quantity=quantity,
+            dry_run=dry_run,
+            use_token_cache=False if no_token_cache else account.token_cache,
+        )
+        typer.echo(summarize_edit(result))
+    except OrderError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    except (TradeError, PrepareError, BrowserGone, EasyApiError, TimeoutError) as exc:
+        logger.error("%s", exc)
+        raise typer.Exit(1) from exc
+    except Exception:
+        logger.exception("Unhandled error")
+        raise typer.Exit(1)
+
+
+@app.command("cancel")
+def cancel_cmd(
+    order_id: OrderIdOpt,
+    username: Username = None,
+    password: Password = None,
+    dry_run: DryRunOpt = False,
+    no_token_cache: NoTokenCacheOpt = False,
+) -> None:
+    """Cancel an open order, then confirm it is gone or cancelled."""
+    try:
+        account = _account(username, password)
+        result = cancel_account_order(
+            account,
+            order_id,
+            dry_run=dry_run,
+            use_token_cache=False if no_token_cache else account.token_cache,
+        )
+        typer.echo(summarize_cancel(result))
+    except OrderError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    except (TradeError, PrepareError, BrowserGone, EasyApiError, TimeoutError) as exc:
+        logger.error("%s", exc)
+        raise typer.Exit(1) from exc
+    except Exception:
+        logger.exception("Unhandled error")
+        raise typer.Exit(1)
 
 
 @app.callback(invoke_without_command=True)

@@ -14,8 +14,11 @@ from autotrade.broker.constants import (
     DEFAULT_BUY_COMMISSION,
     DEFAULT_SELL_COMMISSION,
     MIN_TOKEN_LEN,
+    ORDER_DELETE_PATH,
     ORDER_FROM,
+    ORDER_LIST_PATH,
     ORDER_MODEL_TYPE,
+    ORDER_SUBMIT_PATH,
     SIDE_BUY,
     SIDE_SELL,
     SUBMIT_INTERVAL_FLOOR_S,
@@ -331,14 +334,86 @@ class EasyTraderClient:
             side.value,
             payload["order"],
         )
-        return self._request("POST", "/core/api/v2/order", json_body=payload)
+        return self._request("POST", ORDER_SUBMIT_PATH, json_body=payload)
 
     def list_orders(self) -> list[dict[str, Any]]:
-        data = self._request("GET", "/core/api/order")
+        data = self._request("GET", ORDER_LIST_PATH)
         orders = data.get("orders") if isinstance(data, dict) else None
         if orders is None:
             raise EasyApiError(f"order list missing 'orders': {str(data)[:120]}")
         return orders
+
+    @staticmethod
+    def build_modify_payload(
+        *,
+        side: Side,
+        isin: str,
+        symbol_name: str,
+        quantity: int,
+        price: int,
+        commission: float,
+        parent_id: str,
+        validity_type: int = VALIDITY_TYPE_DAY,
+        validity_date: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Body of PUT /core/api/v2/order.
+
+        EasyTrader 2.6.1 sends ``{modifyOrder: {...}}``. ``parentId`` is the id of
+        the order being replaced and ``id`` is null. The web app does not send
+        the host serial (``hon``) on this call.
+        """
+        if not parent_id:
+            raise EasyApiError("modify order requires parentId")
+        if quantity <= 0:
+            raise EasyApiError(f"quantity must be > 0 (got {quantity}).")
+        if price <= 0:
+            raise EasyApiError(f"price must be > 0 (got {price}).")
+        if not isin:
+            raise EasyApiError("symbolIsin empty.")
+        n = now or datetime.now(TEHRAN_TZ)
+        modify_order: dict[str, Any] = {
+            "price": price,
+            "quantity": quantity,
+            "side": SIDE_BUY if side is Side.BUY else SIDE_SELL,
+            "validityType": validity_type,
+            "createDateTime": format_create_datetime(n),
+            "commission": commission,
+            "symbolIsin": isin,
+            "symbolName": symbol_name,
+            "orderModelType": ORDER_MODEL_TYPE,
+            "totalValue": order_total_value(
+                side=side, price=price, quantity=quantity, commission=commission
+            ),
+            "orderFrom": ORDER_FROM,
+            "id": None,
+            "parentId": parent_id,
+        }
+        if validity_type != VALIDITY_TYPE_DAY and validity_date:
+            modify_order["validityDate"] = validity_date
+        return {"modifyOrder": modify_order}
+
+    def modify_order(self, body: dict[str, Any]) -> Any:
+        """One PUT. Do not call this again after the broker has accepted it."""
+        modify_order = body.get("modifyOrder") if isinstance(body, dict) else None
+        if not isinstance(modify_order, dict) or not modify_order.get("parentId"):
+            raise EasyApiError("modify order requires parentId")
+        logger.info(
+            "Modifying order via API: parentId=%s %s qty=%s price=%s",
+            modify_order.get("parentId"),
+            modify_order.get("symbolName"),
+            modify_order.get("quantity"),
+            modify_order.get("price"),
+        )
+        return self._request("PUT", ORDER_SUBMIT_PATH, json_body=body)
+
+    def cancel_order(self, order_id: str, *, order_from: int = ORDER_FROM) -> Any:
+        """One DELETE. Do not call this again after the broker has accepted it."""
+        if not order_id:
+            raise EasyApiError("cancel order requires orderId")
+        body = {"orderId": order_id, "orderFrom": order_from}
+        logger.info("Cancelling order via API: orderId=%s", order_id)
+        return self._request("DELETE", ORDER_DELETE_PATH, json_body=body)
 
     def order_appeared(
         self,

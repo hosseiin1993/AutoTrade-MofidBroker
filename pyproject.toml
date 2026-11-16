@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autotrade-mofid"
 version = "0.1.1"
-description = "Python library to place buy/sell limit orders on Mofid EasyTrader"
+description = "Python library to place, edit, and cancel limit orders on Mofid EasyTrader"
 readme = "README.md"
 requires-python = ">=3.15"
 license = "MIT"
