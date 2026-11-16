@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from collections.abc import Callable
+from typing import Annotated, TypeVar
 
 import typer
 
 from autotrade.broker.errors import EasyApiError
 from autotrade.browser import BrowserGone
-from autotrade.config import get_settings
+from autotrade.config import Settings, get_settings
 from autotrade.logging_setup import setup_logging
 from autotrade.models import PriceMode, Side
 from autotrade.broker.orders import format_orders
@@ -79,6 +80,28 @@ SideOpt = Annotated[
 ]
 OrderIdOpt = Annotated[str, typer.Option("--order-id", help="Broker order id")]
 
+T = TypeVar("T")
+
+
+def _cli_run(action: Callable[[], T]) -> T:
+    try:
+        return action()
+    except OrderError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    except (TradeError, PrepareError, BrowserGone, EasyApiError, TimeoutError) as exc:
+        logger.error("%s", exc)
+        raise typer.Exit(1) from exc
+    except Exception:
+        logger.exception("Unhandled error")
+        raise typer.Exit(1)
+
+
+def _account(username: str | None, password: str | None) -> Settings:
+    settings = get_settings()
+    setup_logging(settings.log_level, settings.log_file)
+    return with_account(settings, username, password)
+
 
 def _go(
     *,
@@ -94,10 +117,8 @@ def _go(
     no_verify: bool,
     no_token_cache: bool,
 ) -> None:
-    settings = get_settings()
-    setup_logging(settings.log_level, settings.log_file)
-    try:
-        account = with_account(settings, username, password)
+    def action() -> None:
+        account = _account(username, password)
         order = Order.resolve(
             account,
             side=side,
@@ -111,15 +132,8 @@ def _go(
             use_token_cache=False if no_token_cache else None,
         )
         place_order(order, account)
-    except OrderError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(2) from exc
-    except (TradeError, PrepareError, BrowserGone, EasyApiError, TimeoutError) as exc:
-        logger.error("%s", exc)
-        raise typer.Exit(1) from exc
-    except Exception:
-        logger.exception("Unhandled error")
-        raise typer.Exit(1)
+
+    _cli_run(action)
 
 
 @app.command("order")
@@ -210,12 +224,6 @@ def sell_cmd(
     )
 
 
-def _account(username: str | None, password: str | None):
-    settings = get_settings()
-    setup_logging(settings.log_level, settings.log_file)
-    return with_account(settings, username, password)
-
-
 @app.command("orders")
 def orders_cmd(
     username: Username = None,
@@ -223,22 +231,16 @@ def orders_cmd(
     no_token_cache: NoTokenCacheOpt = False,
 ) -> None:
     """List open and today's orders (id, symbol, side, qty, filled, price, status)."""
-    try:
+
+    def action() -> None:
         account = _account(username, password)
         rows = list_account_orders(
             account,
             use_token_cache=False if no_token_cache else account.token_cache,
         )
         typer.echo(format_orders(rows))
-    except OrderError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(2) from exc
-    except (TradeError, PrepareError, BrowserGone, EasyApiError, TimeoutError) as exc:
-        logger.error("%s", exc)
-        raise typer.Exit(1) from exc
-    except Exception:
-        logger.exception("Unhandled error")
-        raise typer.Exit(1)
+
+    _cli_run(action)
 
 
 @app.command("edit")
@@ -253,7 +255,8 @@ def edit_cmd(
     no_token_cache: NoTokenCacheOpt = False,
 ) -> None:
     """Modify the unfilled remainder of an open order (price and/or quantity)."""
-    try:
+
+    def action() -> None:
         account = _account(username, password)
         result = edit_account_order(
             account,
@@ -265,15 +268,8 @@ def edit_cmd(
             use_token_cache=False if no_token_cache else account.token_cache,
         )
         typer.echo(summarize_edit(result))
-    except OrderError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(2) from exc
-    except (TradeError, PrepareError, BrowserGone, EasyApiError, TimeoutError) as exc:
-        logger.error("%s", exc)
-        raise typer.Exit(1) from exc
-    except Exception:
-        logger.exception("Unhandled error")
-        raise typer.Exit(1)
+
+    _cli_run(action)
 
 
 @app.command("cancel")
@@ -285,7 +281,8 @@ def cancel_cmd(
     no_token_cache: NoTokenCacheOpt = False,
 ) -> None:
     """Cancel an open order, then confirm it is gone or cancelled."""
-    try:
+
+    def action() -> None:
         account = _account(username, password)
         result = cancel_account_order(
             account,
@@ -294,15 +291,8 @@ def cancel_cmd(
             use_token_cache=False if no_token_cache else account.token_cache,
         )
         typer.echo(summarize_cancel(result))
-    except OrderError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(2) from exc
-    except (TradeError, PrepareError, BrowserGone, EasyApiError, TimeoutError) as exc:
-        logger.error("%s", exc)
-        raise typer.Exit(1) from exc
-    except Exception:
-        logger.exception("Unhandled error")
-        raise typer.Exit(1)
+
+    _cli_run(action)
 
 
 @app.callback(invoke_without_command=True)

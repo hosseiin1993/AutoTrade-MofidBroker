@@ -385,6 +385,17 @@ def test_cancel_dry_run_and_terminal_orders_do_not_send() -> None:
         run_cancel(done, ORDER_ID)
     assert _deletes(done_calls) == []
 
+    # Modify (1) is the replaced parent left on the list — not actionable.
+    parent, parent_calls = _client(
+        _order(orderState=1, orderStateStr="Modify", executedQuantity=0)
+    )
+    with pytest.raises(OrderError, match="cannot be cancelled"):
+        run_cancel(parent, ORDER_ID)
+    assert _deletes(parent_calls) == []
+    with pytest.raises(OrderError, match="not open"):
+        run_edit(parent, ORDER_ID, price=50_000, now=NOW)
+    assert _puts(parent_calls) == []
+
 
 def test_playwright_transport_put_and_delete_keep_the_json_body() -> None:
     ctx = _Ctx()

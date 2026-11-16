@@ -231,6 +231,15 @@ class EasyTraderClient:
         matches.sort(key=lambda s: not s.get("isActive", False))
         return matches[0]
 
+    def find_symbol_by_isin(self, isin: str) -> dict[str, Any]:
+        target = (isin or "").strip()
+        if not target:
+            raise EasyApiError("Empty symbol isin.")
+        for symbol in self.all_symbols():
+            if str(symbol.get("symbolIsin") or "") == target:
+                return symbol
+        raise EasyApiError(f"Symbol isin {isin!r} not found.")
+
     def market_data(self, isin: str) -> dict[str, Any]:
         data = self._request("POST", "/symbols/api/marketdata/v2", json_body=[isin])
         if not isinstance(data, list) or not data:
@@ -259,7 +268,7 @@ class EasyTraderClient:
         return data
 
     @staticmethod
-    def build_order_payload(
+    def _order_fields(
         *,
         side: Side,
         isin: str,
@@ -267,6 +276,8 @@ class EasyTraderClient:
         quantity: int,
         price: int,
         commission: float,
+        validity_type: int = VALIDITY_TYPE_DAY,
+        validity_date: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         if quantity <= 0:
@@ -276,22 +287,47 @@ class EasyTraderClient:
         if not isin:
             raise EasyApiError("symbolIsin empty.")
         n = now or datetime.now(TEHRAN_TZ)
+        body: dict[str, Any] = {
+            "price": price,
+            "quantity": quantity,
+            "side": SIDE_BUY if side is Side.BUY else SIDE_SELL,
+            "validityType": validity_type,
+            "createDateTime": format_create_datetime(n),
+            "commission": commission,
+            "symbolIsin": isin,
+            "symbolName": symbol_name,
+            "orderModelType": ORDER_MODEL_TYPE,
+            "totalValue": order_total_value(
+                side=side, price=price, quantity=quantity, commission=commission
+            ),
+            "orderFrom": ORDER_FROM,
+        }
+        if validity_type != VALIDITY_TYPE_DAY and validity_date:
+            body["validityDate"] = validity_date
+        return body
+
+    @classmethod
+    def build_order_payload(
+        cls,
+        *,
+        side: Side,
+        isin: str,
+        symbol_name: str,
+        quantity: int,
+        price: int,
+        commission: float,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
         return {
-            "order": {
-                "price": price,
-                "quantity": quantity,
-                "side": SIDE_BUY if side is Side.BUY else SIDE_SELL,
-                "validityType": VALIDITY_TYPE_DAY,
-                "createDateTime": format_create_datetime(n),
-                "commission": commission,
-                "symbolIsin": isin,
-                "symbolName": symbol_name,
-                "orderModelType": ORDER_MODEL_TYPE,
-                "totalValue": order_total_value(
-                    side=side, price=price, quantity=quantity, commission=commission
-                ),
-                "orderFrom": ORDER_FROM,
-            }
+            "order": cls._order_fields(
+                side=side,
+                isin=isin,
+                symbol_name=symbol_name,
+                quantity=quantity,
+                price=price,
+                commission=commission,
+                now=now,
+            )
         }
 
     def _wait_submit_slot(self, interval: float) -> float:
@@ -343,8 +379,9 @@ class EasyTraderClient:
             raise EasyApiError(f"order list missing 'orders': {str(data)[:120]}")
         return orders
 
-    @staticmethod
+    @classmethod
     def build_modify_payload(
+        cls,
         *,
         side: Side,
         isin: str,
@@ -365,33 +402,23 @@ class EasyTraderClient:
         """
         if not parent_id:
             raise EasyApiError("modify order requires parentId")
-        if quantity <= 0:
-            raise EasyApiError(f"quantity must be > 0 (got {quantity}).")
-        if price <= 0:
-            raise EasyApiError(f"price must be > 0 (got {price}).")
-        if not isin:
-            raise EasyApiError("symbolIsin empty.")
-        n = now or datetime.now(TEHRAN_TZ)
-        modify_order: dict[str, Any] = {
-            "price": price,
-            "quantity": quantity,
-            "side": SIDE_BUY if side is Side.BUY else SIDE_SELL,
-            "validityType": validity_type,
-            "createDateTime": format_create_datetime(n),
-            "commission": commission,
-            "symbolIsin": isin,
-            "symbolName": symbol_name,
-            "orderModelType": ORDER_MODEL_TYPE,
-            "totalValue": order_total_value(
-                side=side, price=price, quantity=quantity, commission=commission
-            ),
-            "orderFrom": ORDER_FROM,
-            "id": None,
-            "parentId": parent_id,
+        return {
+            "modifyOrder": {
+                **cls._order_fields(
+                    side=side,
+                    isin=isin,
+                    symbol_name=symbol_name,
+                    quantity=quantity,
+                    price=price,
+                    commission=commission,
+                    validity_type=validity_type,
+                    validity_date=validity_date,
+                    now=now,
+                ),
+                "id": None,
+                "parentId": parent_id,
+            }
         }
-        if validity_type != VALIDITY_TYPE_DAY and validity_date:
-            modify_order["validityDate"] = validity_date
-        return {"modifyOrder": modify_order}
 
     def modify_order(self, body: dict[str, Any]) -> Any:
         """One PUT. Do not call this again after the broker has accepted it."""

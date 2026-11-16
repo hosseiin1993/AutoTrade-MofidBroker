@@ -7,15 +7,21 @@ from typing import Any
 
 from autotrade.broker.constants import (
     CANCELLED_ORDER_STATES,
+    DELETABLE_ORDER_STATES,
     EXECUTED_ORDER_STATES,
     OPEN_ORDER_STATES,
     ORDER_STATE_NAMES,
+    ORDER_STATE_ON_CANCELING,
     VALIDITY_TYPE_DAY,
 )
 from autotrade.models import Side
+from autotrade.order import OrderError
 
 _OPEN_NAMES = {ORDER_STATE_NAMES[code].casefold() for code in OPEN_ORDER_STATES}
-_CANCELLED_NAMES = {ORDER_STATE_NAMES[code].casefold() for code in CANCELLED_ORDER_STATES}
+_CANCELLED_NORM = {
+    "".join(ch for ch in ORDER_STATE_NAMES[code].casefold() if ch.isalnum())
+    for code in CANCELLED_ORDER_STATES
+}
 _STATE_BY_NAME = {name.casefold(): code for code, name in ORDER_STATE_NAMES.items()}
 
 
@@ -49,7 +55,6 @@ class LiveOrder:
     status: str
     state: int | None = None
     parent_id: str | None = None
-    hon: int | None = None
     validity_type: int = VALIDITY_TYPE_DAY
     validity_date: str | None = None
 
@@ -58,10 +63,14 @@ class LiveOrder:
         return max(self.quantity - self.filled, 0)
 
     @property
+    def status_norm(self) -> str:
+        return _norm_status(self.status)
+
+    @property
     def cancelled(self) -> bool:
         if self.state in CANCELLED_ORDER_STATES:
             return True
-        return _norm_status(self.status) in {_norm_status(name) for name in _CANCELLED_NAMES}
+        return self.status_norm in _CANCELLED_NORM
 
     @property
     def fully_executed(self) -> bool:
@@ -69,33 +78,65 @@ class LiveOrder:
             return True
         if self.state in EXECUTED_ORDER_STATES:
             return True
-        norm = _norm_status(self.status)
-        if norm == "orderexecuted":
+        if self.status_norm == "orderexecuted":
             return True
-        return norm == "done" and self.remainder <= 0
+        return self.status_norm == "done" and self.remainder <= 0
 
     @property
-    def editable(self) -> bool:
-        if self.cancelled or self.fully_executed or self.remainder <= 0:
-            return False
-        if self.state in OPEN_ORDER_STATES:
+    def cancel_pending(self) -> bool:
+        """Broker accepted a cancel and has not finished it yet (OnCanceling)."""
+        return (
+            self.state == ORDER_STATE_ON_CANCELING or self.status_norm == "oncanceling"
+        )
+
+    def _state_allows(self, allowed: frozenset[int], names: set[str]) -> bool:
+        if self.state in allowed:
             return True
         if self.state is None and (
-            not self.status or self.status == "Unknown" or self.status.casefold() in _OPEN_NAMES
+            not self.status or self.status == "Unknown" or self.status.casefold() in names
         ):
             return True
         return False
 
     @property
-    def cancellable(self) -> bool:
-        return self.remainder > 0 and not self.cancelled and not self.fully_executed
+    def editable(self) -> bool:
+        if self.cancelled or self.fully_executed or self.remainder <= 0:
+            return False
+        return self._state_allows(OPEN_ORDER_STATES, _OPEN_NAMES)
 
     @property
-    def cancel_pending(self) -> bool:
-        """Broker accepted a cancel and has not finished it yet (OnCanceling)."""
-        if self.state == 9:
-            return True
-        return _norm_status(self.status) == "oncanceling"
+    def cancellable(self) -> bool:
+        """Open remainder the ticket can delete. A Modify parent is not actionable."""
+        if self.cancelled or self.fully_executed or self.remainder <= 0:
+            return False
+        return self._state_allows(DELETABLE_ORDER_STATES, _OPEN_NAMES | {"error"})
+
+    def refuse_edit(self) -> None:
+        if self.cancelled:
+            raise OrderError(f"order {self.id} is cancelled ({self.status})")
+        if self.fully_executed or self.remainder <= 0:
+            raise OrderError(
+                f"order {self.id} is fully executed "
+                f"(filled {self.filled} of {self.quantity})"
+            )
+        if not self.editable:
+            raise OrderError(
+                f"order {self.id} is not open ({self.status}); "
+                "only the unfilled remainder of an open order can be edited"
+            )
+
+    def refuse_cancel(self) -> None:
+        if self.cancelled:
+            raise OrderError(f"order {self.id} is already cancelled ({self.status})")
+        if self.fully_executed or self.remainder <= 0:
+            raise OrderError(
+                f"order {self.id} is fully executed "
+                f"(filled {self.filled} of {self.quantity}); nothing left to cancel"
+            )
+        if not self.cancellable:
+            raise OrderError(
+                f"order {self.id} cannot be cancelled ({self.status})"
+            )
 
 
 def _side(value: object) -> Side | None:
@@ -137,21 +178,11 @@ def _row_dict(item: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(nested, dict):
         return item
     merged = dict(nested)
-    for key in (
-        "id",
-        "orderId",
-        "orderState",
-        "orderStateStr",
-        "executedQuantity",
-        "ExecutedQuantity",
-        "parentId",
-        "hon",
-        "symbolName",
-        "symbolIsin",
-        "trades",
-    ):
-        if merged.get(key) in (None, "") and item.get(key) not in (None, ""):
-            merged[key] = item[key]
+    for key, value in item.items():
+        if key == "order":
+            continue
+        if merged.get(key) in (None, "") and value not in (None, ""):
+            merged[key] = value
     return merged
 
 
@@ -176,7 +207,9 @@ def parse_live_order(item: dict[str, Any]) -> LiveOrder:
     if state is None and isinstance(state_value, str) and state_value.strip():
         status_text = status_text or state_value.strip()
         state = _STATE_BY_NAME.get(state_value.strip().casefold())
-    status = status_text or (ORDER_STATE_NAMES.get(state, str(state)) if state is not None else "Unknown")
+    status = status_text or (
+        ORDER_STATE_NAMES.get(state, str(state)) if state is not None else "Unknown"
+    )
 
     validity = _as_int(row.get("validityType"))
     validity_date = row.get("validityDate")
@@ -192,17 +225,9 @@ def parse_live_order(item: dict[str, Any]) -> LiveOrder:
         status=status,
         state=state,
         parent_id=str(parent).strip() if parent not in (None, "") else None,
-        hon=_as_int(row.get("hon")),
         validity_type=VALIDITY_TYPE_DAY if validity is None else validity,
         validity_date=str(validity_date) if validity_date not in (None, "") else None,
     )
-
-
-def parse_live_orders(items: list[dict[str, Any]]) -> list[LiveOrder]:
-    orders: list[LiveOrder] = []
-    for item in items:
-        orders.append(parse_live_order(item))
-    return orders
 
 
 def format_orders(orders: list[LiveOrder]) -> str:

@@ -10,12 +10,12 @@ from datetime import datetime
 from typing import Any
 
 from autotrade.broker.client import EasyTraderClient
-from autotrade.broker.constants import MIN_NOTIONAL_RIAL, TEHRAN_TZ
+from autotrade.broker.constants import TEHRAN_TZ
 from autotrade.broker.errors import EasyApiError
 from autotrade.broker.orders import LiveOrder, parse_live_order
 from autotrade.models import PriceMode, Side
 from autotrade.order import OrderError, TradeError
-from autotrade.trading.prepare import PrepareError
+from autotrade.trading.prepare import PrepareError, validate_limit_terms
 from autotrade.trading.price import PriceError, resolve_price
 from autotrade.trading.submit import classify_submit_response
 
@@ -65,27 +65,6 @@ def find_live_order(client: EasyTraderClient, order_id: str) -> LiveOrder:
     raise OrderError(f"order {target} not found")
 
 
-def _positive(source: dict[str, Any], *keys: str) -> int | None:
-    for key in keys:
-        value = source.get(key)
-        if isinstance(value, bool) or value is None:
-            continue
-        if isinstance(value, int) and value > 0:
-            return value
-        if isinstance(value, float) and value.is_integer() and int(value) > 0:
-            return int(value)
-    return None
-
-
-def _symbol_for(client: EasyTraderClient, isin: str) -> dict[str, Any]:
-    if not isin:
-        raise PrepareError("order is missing a symbol isin")
-    for symbol in client.all_symbols():
-        if str(symbol.get("symbolIsin") or "") == isin:
-            return symbol
-    raise PrepareError(f"symbol {isin} is not in the broker symbol list")
-
-
 def _coerce_mode(price_mode: PriceMode | str | None) -> PriceMode | None:
     if price_mode is None or isinstance(price_mode, PriceMode):
         return price_mode
@@ -100,19 +79,19 @@ def resolve_edit_price(
     order: LiveOrder,
     price_mode: PriceMode | None,
     price: int | None,
-) -> tuple[int, PriceMode | None]:
+) -> int:
     if price_mode is None and price is None:
         if order.price <= 0:
             raise PrepareError("order price is missing")
-        return order.price, None
+        return order.price
     mode = price_mode if price_mode is not None else PriceMode.FIXED
     try:
-        resolved, used = resolve_price(
+        resolved, _used = resolve_price(
             md, side=order.side, price_mode=mode, fixed_price=price or 0
         )
     except PriceError as exc:
         raise PrepareError(str(exc)) from exc
-    return resolved, used
+    return resolved
 
 
 def resolve_edit_quantity(order: LiveOrder, quantity: int | None) -> int:
@@ -122,74 +101,6 @@ def resolve_edit_quantity(order: LiveOrder, quantity: int | None) -> int:
     if quantity <= 0:
         raise OrderError("quantity must be > 0")
     return quantity
-
-
-def validate_edit_terms(
-    *,
-    price: int,
-    quantity: int,
-    side: Side,
-    symbol: dict[str, Any],
-    md: dict[str, Any],
-) -> None:
-    low = _positive(md, "lowAllowedPrice", "minDailyPrice")
-    high = _positive(md, "highAllowedPrice", "maxDailyPrice")
-    if low is None or high is None:
-        raise PrepareError("daily price band is missing for this symbol")
-    if price < low or price > high:
-        raise PrepareError(f"price {price} is outside the daily band {low}–{high}")
-
-    lot = _positive(symbol, "minDealableCount", "lotSize") or _positive(
-        md, "minDealableCount", "lotSize"
-    )
-    if lot and quantity % lot != 0:
-        raise PrepareError(f"quantity {quantity} is not a multiple of lot size {lot}")
-
-    tick = _positive(symbol, "minDealablePrice") or _positive(md, "minDealablePrice")
-    if tick and tick > 1 and price % tick != 0:
-        raise PrepareError(f"price {price} is not a multiple of the price step {tick}")
-
-    if side is Side.BUY:
-        min_q = md.get("minValidBuyVolume")
-        max_q = md.get("maxValidBuyVolume")
-    else:
-        min_q = md.get("minValidSellVolume") or md.get("minValidBuyVolume")
-        max_q = md.get("maxValidSellVolume") or md.get("maxValidBuyVolume")
-    if min_q and quantity < int(min_q):
-        raise PrepareError(f"quantity {quantity} below min volume {min_q}.")
-    if max_q and quantity > int(max_q):
-        raise PrepareError(f"quantity {quantity} above max volume {max_q}.")
-
-    notional = price * quantity
-    if notional < MIN_NOTIONAL_RIAL:
-        raise PrepareError(
-            f"order notional {notional:,} Rial is below the {MIN_NOTIONAL_RIAL:,} Rial minimum"
-        )
-
-
-def _require_editable(order: LiveOrder) -> None:
-    if order.cancelled:
-        raise OrderError(f"order {order.id} is cancelled ({order.status})")
-    if order.fully_executed or order.remainder <= 0:
-        raise OrderError(
-            f"order {order.id} is fully executed "
-            f"(filled {order.filled} of {order.quantity})"
-        )
-    if not order.editable:
-        raise OrderError(
-            f"order {order.id} is not open ({order.status}); "
-            "only the unfilled remainder of an open order can be edited"
-        )
-
-
-def _require_cancellable(order: LiveOrder) -> None:
-    if order.cancelled:
-        raise OrderError(f"order {order.id} is already cancelled ({order.status})")
-    if order.fully_executed or order.remainder <= 0:
-        raise OrderError(
-            f"order {order.id} is fully executed "
-            f"(filled {order.filled} of {order.quantity}); nothing left to cancel"
-        )
 
 
 def prepare_edit(
@@ -202,16 +113,16 @@ def prepare_edit(
     now: datetime | None = None,
 ) -> EditResult:
     order = find_live_order(client, order_id)
-    _require_editable(order)
+    order.refuse_edit()
     mode = _coerce_mode(price_mode)
     try:
-        symbol = _symbol_for(client, order.isin)
+        symbol = client.find_symbol_by_isin(order.isin)
         md = client.market_data(order.isin)
     except EasyApiError as exc:
         raise PrepareError(f"Order prep failed: {exc}") from exc
-    final_price, used_mode = resolve_edit_price(md, order, mode, price)
+    final_price = resolve_edit_price(md, order, mode, price)
     final_qty = resolve_edit_quantity(order, quantity)
-    validate_edit_terms(
+    validate_limit_terms(
         price=final_price,
         quantity=final_qty,
         side=order.side,
@@ -307,7 +218,7 @@ def run_cancel(
     monotonic_fn=time.monotonic,
 ) -> CancelResult:
     order = find_live_order(client, order_id)
-    _require_cancellable(order)
+    order.refuse_cancel()
     if dry_run:
         logger.info("Dry run — cancel not sent for %s.", order.id)
         return CancelResult(

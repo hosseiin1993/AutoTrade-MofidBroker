@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TypeVar
+
 from autotrade.config import Settings, get_settings
 from autotrade.logging_setup import setup_logging
 from autotrade.models import PriceMode, Side
@@ -14,6 +17,43 @@ from autotrade.session import (
     place_order,
 )
 from autotrade.trading.manage import CancelResult, EditResult
+
+T = TypeVar("T")
+
+
+def _account(
+    *,
+    username: str | None,
+    password: str | None,
+    settings: Settings | None,
+    configure_logging: bool,
+) -> Settings:
+    account = with_account(
+        settings if settings is not None else get_settings(),
+        username,
+        password,
+    )
+    if configure_logging:
+        setup_logging(account.log_level, account.log_file)
+    return account
+
+
+def _with_account(
+    *,
+    username: str | None,
+    password: str | None,
+    settings: Settings | None,
+    configure_logging: bool,
+    action: Callable[[Settings], T],
+) -> T:
+    return action(
+        _account(
+            username=username,
+            password=password,
+            settings=settings,
+            configure_logging=configure_logging,
+        )
+    )
 
 
 def buy(
@@ -93,25 +133,27 @@ def _run(
     settings: Settings | None,
     configure_logging: bool,
 ) -> None:
-    account = with_account(
-        settings if settings is not None else get_settings(),
-        username,
-        password,
+    def action(account: Settings) -> None:
+        order = Order.resolve(
+            account,
+            side=side,
+            symbol=symbol,
+            quantity=quantity,
+            price_mode=price_mode,
+            price=price,
+            target_time=target_time,
+            dry_run=dry_run,
+            verify=verify,
+        )
+        place_order(order, account)
+
+    _with_account(
+        username=username,
+        password=password,
+        settings=settings,
+        configure_logging=configure_logging,
+        action=action,
     )
-    if configure_logging:
-        setup_logging(account.log_level, account.log_file)
-    order = Order.resolve(
-        account,
-        side=side,
-        symbol=symbol,
-        quantity=quantity,
-        price_mode=price_mode,
-        price=price,
-        target_time=target_time,
-        dry_run=dry_run,
-        verify=verify,
-    )
-    place_order(order, account)
 
 
 def list_orders(
@@ -123,14 +165,15 @@ def list_orders(
     use_token_cache: bool = True,
 ) -> list[LiveOrder]:
     """List open and today's orders. Credentials come from ``settings`` / ``.env``, or pass both username and password."""
-    account = with_account(
-        settings if settings is not None else get_settings(),
-        username,
-        password,
+    return _with_account(
+        username=username,
+        password=password,
+        settings=settings,
+        configure_logging=configure_logging,
+        action=lambda account: list_account_orders(
+            account, use_token_cache=use_token_cache
+        ),
     )
-    if configure_logging:
-        setup_logging(account.log_level, account.log_file)
-    return list_account_orders(account, use_token_cache=use_token_cache)
 
 
 def edit_order(
@@ -147,21 +190,20 @@ def edit_order(
     use_token_cache: bool = True,
 ) -> EditResult:
     """Modify the unfilled remainder of an open order. One request; an accept is not retried."""
-    account = with_account(
-        settings if settings is not None else get_settings(),
-        username,
-        password,
-    )
-    if configure_logging:
-        setup_logging(account.log_level, account.log_file)
-    return edit_account_order(
-        account,
-        order_id,
-        price_mode=price_mode,
-        price=price,
-        quantity=quantity,
-        dry_run=dry_run,
-        use_token_cache=use_token_cache,
+    return _with_account(
+        username=username,
+        password=password,
+        settings=settings,
+        configure_logging=configure_logging,
+        action=lambda account: edit_account_order(
+            account,
+            order_id,
+            price_mode=price_mode,
+            price=price,
+            quantity=quantity,
+            dry_run=dry_run,
+            use_token_cache=use_token_cache,
+        ),
     )
 
 
@@ -176,16 +218,15 @@ def cancel_order(
     use_token_cache: bool = True,
 ) -> CancelResult:
     """Cancel an open order, then confirm it is gone or cancelled. An accept is not retried."""
-    account = with_account(
-        settings if settings is not None else get_settings(),
-        username,
-        password,
-    )
-    if configure_logging:
-        setup_logging(account.log_level, account.log_file)
-    return cancel_account_order(
-        account,
-        order_id,
-        dry_run=dry_run,
-        use_token_cache=use_token_cache,
+    return _with_account(
+        username=username,
+        password=password,
+        settings=settings,
+        configure_logging=configure_logging,
+        action=lambda account: cancel_account_order(
+            account,
+            order_id,
+            dry_run=dry_run,
+            use_token_cache=use_token_cache,
+        ),
     )
