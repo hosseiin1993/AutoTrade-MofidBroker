@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
 from autotrade.broker.client import EasyTraderClient
 from autotrade.broker.constants import TEHRAN_TZ
 from autotrade.broker.errors import EasyApiError
-from autotrade.broker.orders import LiveOrder, parse_live_order
+from autotrade.broker.orders import LiveOrder, order_row_id, parse_live_order
 from autotrade.models import PriceMode, Side
 from autotrade.order import OrderError, TradeError
 from autotrade.trading.prepare import PrepareError, validate_limit_terms
@@ -45,9 +45,9 @@ class CancelResult:
 
 
 def list_live_orders(client: EasyTraderClient) -> list[LiveOrder]:
-    rows = client.list_orders()
+    """Parse today's orders for display. Unreadable rows are skipped with a warning."""
     orders: list[LiveOrder] = []
-    for item in rows:
+    for item in client.list_orders():
         try:
             orders.append(parse_live_order(item))
         except ValueError as exc:
@@ -56,13 +56,35 @@ def list_live_orders(client: EasyTraderClient) -> list[LiveOrder]:
 
 
 def find_live_order(client: EasyTraderClient, order_id: str) -> LiveOrder:
+    """Load one order by id. A matching but unreadable row is an error, not a miss."""
     target = (order_id or "").strip()
     if not target:
-        raise OrderError("set --order-id")
-    for order in list_live_orders(client):
-        if order.id == target:
-            return order
+        raise OrderError("order id is required")
+    for item in client.list_orders():
+        if order_row_id(item) != target:
+            continue
+        try:
+            return parse_live_order(item)
+        except ValueError as exc:
+            raise OrderError(f"order {target} is unreadable ({exc})") from exc
     raise OrderError(f"order {target} not found")
+
+
+def _read_order_after_cancel(
+    client: EasyTraderClient, order_id: str
+) -> LiveOrder | None:
+    """Return the live row, None if absent. A corrupt matching row is a TradeError."""
+    for item in client.list_orders():
+        if order_row_id(item) != order_id:
+            continue
+        try:
+            return parse_live_order(item)
+        except ValueError as exc:
+            raise TradeError(
+                f"Cancel was accepted for {order_id}, but the order list row is unreadable "
+                f"({exc}). Not sending the cancel again."
+            ) from exc
+    return None
 
 
 def _coerce_mode(price_mode: PriceMode | str | None) -> PriceMode | None:
@@ -103,6 +125,35 @@ def resolve_edit_quantity(order: LiveOrder, quantity: int | None) -> int:
     return quantity
 
 
+def _refuse_edit(order: LiveOrder) -> None:
+    if order.cancelled:
+        raise OrderError(f"order {order.id} is cancelled ({order.status})")
+    if order.fully_executed or order.remainder <= 0:
+        raise OrderError(
+            f"order {order.id} is fully executed "
+            f"(filled {order.filled} of {order.quantity})"
+        )
+    if not order.editable:
+        raise OrderError(
+            f"order {order.id} is not open ({order.status}); "
+            "only the unfilled remainder of an open order can be edited"
+        )
+
+
+def _refuse_cancel(order: LiveOrder) -> None:
+    if order.cancelled:
+        raise OrderError(f"order {order.id} is already cancelled ({order.status})")
+    if order.fully_executed or order.remainder <= 0:
+        raise OrderError(
+            f"order {order.id} is fully executed "
+            f"(filled {order.filled} of {order.quantity}); nothing left to cancel"
+        )
+    if not order.cancellable:
+        raise OrderError(
+            f"order {order.id} cannot be cancelled ({order.status})"
+        )
+
+
 def prepare_edit(
     client: EasyTraderClient,
     order_id: str,
@@ -113,7 +164,7 @@ def prepare_edit(
     now: datetime | None = None,
 ) -> EditResult:
     order = find_live_order(client, order_id)
-    order.refuse_edit()
+    _refuse_edit(order)
     mode = _coerce_mode(price_mode)
     try:
         symbol = client.find_symbol_by_isin(order.isin)
@@ -172,16 +223,7 @@ def apply_edit(client: EasyTraderClient, plan: EditResult) -> EditResult:
         message = outcome.message or "broker did not accept the edit"
         raise TradeError(f"Edit rejected (code {code}): {message}")
     logger.info("Edit accepted parentId=%s id=%s", plan.order_id, outcome.order_id or "-")
-    return EditResult(
-        order_id=plan.order_id,
-        new_order_id=outcome.order_id,
-        symbol=plan.symbol,
-        side=plan.side,
-        quantity=plan.quantity,
-        price=plan.price,
-        payload=plan.payload,
-        dry_run=False,
-    )
+    return replace(plan, new_order_id=outcome.order_id, dry_run=False)
 
 
 def run_edit(
@@ -218,7 +260,7 @@ def run_cancel(
     monotonic_fn=time.monotonic,
 ) -> CancelResult:
     order = find_live_order(client, order_id)
-    order.refuse_cancel()
+    _refuse_cancel(order)
     if dry_run:
         logger.info("Dry run — cancel not sent for %s.", order.id)
         return CancelResult(
@@ -240,13 +282,12 @@ def run_cancel(
     deadline = monotonic_fn() + confirm_timeout
     while True:
         try:
-            after = list_live_orders(client)
+            found = _read_order_after_cancel(client, order.id)
         except EasyApiError as exc:
             raise TradeError(
                 f"Cancel was accepted for {order.id}, but the order list could not be read "
                 f"to confirm it ({exc}). Not sending the cancel again. Filled {order.filled}."
             ) from exc
-        found = next((row for row in after if row.id == order.id), None)
         if found is None:
             logger.info("Cancel confirmed: %s is gone. Filled %s.", order.id, order.filled)
             return CancelResult(

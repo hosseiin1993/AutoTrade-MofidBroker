@@ -15,7 +15,6 @@ from autotrade.broker.constants import (
     VALIDITY_TYPE_DAY,
 )
 from autotrade.models import Side
-from autotrade.order import OrderError
 
 _OPEN_NAMES = {ORDER_STATE_NAMES[code].casefold() for code in OPEN_ORDER_STATES}
 _CANCELLED_NORM = {
@@ -111,32 +110,18 @@ class LiveOrder:
             return False
         return self._state_allows(DELETABLE_ORDER_STATES, _OPEN_NAMES | {"error"})
 
-    def refuse_edit(self) -> None:
-        if self.cancelled:
-            raise OrderError(f"order {self.id} is cancelled ({self.status})")
-        if self.fully_executed or self.remainder <= 0:
-            raise OrderError(
-                f"order {self.id} is fully executed "
-                f"(filled {self.filled} of {self.quantity})"
-            )
-        if not self.editable:
-            raise OrderError(
-                f"order {self.id} is not open ({self.status}); "
-                "only the unfilled remainder of an open order can be edited"
-            )
 
-    def refuse_cancel(self) -> None:
-        if self.cancelled:
-            raise OrderError(f"order {self.id} is already cancelled ({self.status})")
-        if self.fully_executed or self.remainder <= 0:
-            raise OrderError(
-                f"order {self.id} is fully executed "
-                f"(filled {self.filled} of {self.quantity}); nothing left to cancel"
-            )
-        if not self.cancellable:
-            raise OrderError(
-                f"order {self.id} cannot be cancelled ({self.status})"
-            )
+def order_row_id(item: dict[str, Any]) -> str | None:
+    """Id of a raw list-orders row, including nested ``order`` shapes."""
+    if not isinstance(item, dict):
+        return None
+    row = item.get("order") if isinstance(item.get("order"), dict) else item
+    if not isinstance(row, dict):
+        return None
+    raw = row.get("id") or row.get("orderId") or item.get("id") or item.get("orderId")
+    if raw is None or str(raw).strip() == "":
+        return None
+    return str(raw).strip()
 
 
 def _side(value: object) -> Side | None:

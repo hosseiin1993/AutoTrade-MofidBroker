@@ -488,3 +488,26 @@ def test_modify_payload_requires_a_parent_id() -> None:
             commission=0.003712,
             parent_id="",
         )
+
+
+def test_find_and_cancel_confirm_fail_hard_on_unreadable_matching_row() -> None:
+    """A soft-skip list must not treat a corrupt matching id as missing/gone."""
+    from autotrade.trading.manage import find_live_order
+
+    bad = {"id": ORDER_ID, "symbolName": "فولاد", "symbolIsin": ISIN}
+    client, _calls = _client(orders_body={"orders": [bad]})
+    with pytest.raises(OrderError, match="unreadable"):
+        find_live_order(client, ORDER_ID)
+
+    state = {"n": 0}
+
+    def orders():
+        state["n"] += 1
+        if state["n"] == 1:
+            return {"orders": [_order()]}
+        return {"orders": [bad]}
+
+    flaky, flaky_calls = _client(orders_body=orders)
+    with pytest.raises(TradeError, match="unreadable"):
+        run_cancel(flaky, ORDER_ID)
+    assert len(_deletes(flaky_calls)) == 1
